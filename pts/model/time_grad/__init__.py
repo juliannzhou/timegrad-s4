@@ -1,3 +1,5 @@
-from .time_grad_estimator import TimeGradEstimator
-from .time_grad_network import TimeGradTrainingNetwork, TimeGradPredictionNetwork
-from .epsilon_theta import EpsilonTheta
+from .estimator import TimeGradEstimator
+from .lightning_module import TimeGradLightningModule
+from .module import TimeGradModel
+
+__all__ = ["TimeGradModel", "TimeGradLightningModule", "TimeGradEstimator"]

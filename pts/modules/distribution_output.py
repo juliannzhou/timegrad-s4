@@ -1,42 +1,28 @@
-from abc import ABC, abstractclassmethod
 import warnings
-from typing import Callable, Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import numpy as np
+
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import (
-    Distribution,
     Beta,
-    NegativeBinomial,
-    StudentT,
-    Normal,
     Categorical,
-    MixtureSameFamily,
+    Distribution,
     Independent,
     LowRankMultivariateNormal,
+    MixtureSameFamily,
     MultivariateNormal,
-    TransformedDistribution,
-    AffineTransform,
+    NegativeBinomial,
+    Normal,
     Poisson,
 )
 
-from pts.distributions import (
-    ZeroInflatedPoisson,
-    ZeroInflatedNegativeBinomial,
-    PiecewiseLinear,
-    TransformedPiecewiseLinear,
-    ImplicitQuantile,
-    TransformedImplicitQuantile,
-)
 from gluonts.core.component import validated
-from gluonts.torch.distributions.distribution_output import (
-    DistributionOutput,
-    LambdaLayer,
-    PtArgProj,
-)
-from pts.modules.iqn_modules import ImplicitQuantileModule
+from gluonts.torch.distributions import AffineTransformed, DistributionOutput
+from gluonts.torch.distributions.studentT import StudentT
+
+from pts.distributions import ZeroInflatedNegativeBinomial, ZeroInflatedPoisson
 
 
 class IndependentDistributionOutput(DistributionOutput):
@@ -58,14 +44,25 @@ class IndependentDistributionOutput(DistributionOutput):
         return Independent(distr, 1)
 
     def distribution(
-        self, distr_args, scale: Optional[torch.Tensor] = None
+        self,
+        distr_args,
+        loc: Optional[torch.Tensor] = None,
+        scale: Optional[torch.Tensor] = None,
     ) -> Distribution:
-
         distr = self.independent(self.distr_cls(*distr_args))
         if scale is None:
-            return distr
-        else:
-            return TransformedDistribution(distr, [AffineTransform(loc=0, scale=scale)])
+            scale = 1.0
+        if loc is None:
+            loc = 0.0
+        return AffineTransformed(distr, loc=loc, scale=scale)
+
+    @staticmethod
+    def squareplus(x: torch.Tensor) -> torch.Tensor:
+        r"""
+        Helper to map inputs to the positive orthant by applying the square-plus operation. Reference:
+        https://twitter.com/jon_barron/status/1387167648669048833
+        """
+        return (x + torch.sqrt(torch.square(x) + 4.0)) / 2.0
 
 
 class NormalOutput(IndependentDistributionOutput):
@@ -79,7 +76,7 @@ class NormalOutput(IndependentDistributionOutput):
 
     @classmethod
     def domain_map(cls, loc, scale):
-        scale = F.softplus(scale)
+        scale = cls.squareplus(scale)
         return loc.squeeze(-1), scale.squeeze(-1)
 
 
@@ -104,8 +101,8 @@ class BetaOutput(IndependentDistributionOutput):
 
     @classmethod
     def domain_map(cls, concentration1, concentration0):
-        concentration1 = F.softplus(concentration1) + 1e-8
-        concentration0 = F.softplus(concentration0) + 1e-8
+        concentration1 = cls.squareplus(concentration1) + 1e-8
+        concentration0 = cls.squareplus(concentration0) + 1e-8
         return concentration1.squeeze(-1), concentration0.squeeze(-1)
 
 
@@ -120,17 +117,23 @@ class PoissonOutput(IndependentDistributionOutput):
 
     @classmethod
     def domain_map(cls, rate):
-        rate_pos = F.softplus(rate).clone()
+        rate_pos = cls.squareplus(rate).clone()
 
         return (rate_pos.squeeze(-1),)
 
     def distribution(
-        self, distr_args, scale: Optional[torch.Tensor] = None
+        self,
+        distr_args,
+        loc: Optional[torch.Tensor] = None,
+        scale: Optional[torch.Tensor] = None,
     ) -> Distribution:
         (rate,) = distr_args
 
         if scale is not None:
             rate *= scale
+
+        if loc is not None:
+            rate += loc
 
         return self.independent(Poisson(rate))
 
@@ -147,17 +150,23 @@ class ZeroInflatedPoissonOutput(IndependentDistributionOutput):
     @classmethod
     def domain_map(cls, gate, rate):
         gate_unit = torch.sigmoid(gate).clone()
-        rate_pos = F.softplus(rate).clone()
+        rate_pos = cls.squareplus(rate).clone()
 
         return gate_unit.squeeze(-1), rate_pos.squeeze(-1)
 
     def distribution(
-        self, distr_args, scale: Optional[torch.Tensor] = None
+        self,
+        distr_args,
+        loc: Optional[torch.Tensor] = None,
+        scale: Optional[torch.Tensor] = None,
     ) -> Distribution:
         gate, rate = distr_args
 
         if scale is not None:
             rate *= scale
+
+        if loc is not None:
+            rate += loc
 
         return self.independent(ZeroInflatedPoisson(gate=gate, rate=rate))
 
@@ -173,16 +182,23 @@ class NegativeBinomialOutput(IndependentDistributionOutput):
 
     @classmethod
     def domain_map(cls, total_count, logits):
-        total_count = F.softplus(total_count)
+        total_count = cls.squareplus(total_count)
         return total_count.squeeze(-1), logits.squeeze(-1)
 
     def distribution(
-        self, distr_args, scale: Optional[torch.Tensor] = None
+        self,
+        distr_args,
+        loc: Optional[torch.Tensor] = None,
+        scale: Optional[torch.Tensor] = None,
     ) -> Distribution:
         total_count, logits = distr_args
 
         if scale is not None:
             logits += scale.log()
+
+        # shift negative binomial parameters by loc
+        if loc is not None:
+            total_count += loc
 
         return self.independent(
             NegativeBinomial(total_count=total_count, logits=logits)
@@ -201,16 +217,23 @@ class ZeroInflatedNegativeBinomialOutput(IndependentDistributionOutput):
     @classmethod
     def domain_map(cls, gate, total_count, logits):
         gate = torch.sigmoid(gate)
-        total_count = F.softplus(total_count)
+        total_count = cls.squareplus(total_count)
         return gate.squeeze(-1), total_count.squeeze(-1), logits.squeeze(-1)
 
     def distribution(
-        self, distr_args, scale: Optional[torch.Tensor] = None
+        self,
+        distr_args,
+        loc: Optional[torch.Tensor] = None,
+        scale: Optional[torch.Tensor] = None,
     ) -> Distribution:
         gate, total_count, logits = distr_args
 
         if scale is not None:
             logits += scale.log()
+
+        # shift negative binomial parameters by loc
+        if loc is not None:
+            total_count += loc
 
         return self.independent(
             ZeroInflatedNegativeBinomial(
@@ -230,8 +253,8 @@ class StudentTOutput(IndependentDistributionOutput):
 
     @classmethod
     def domain_map(cls, df, loc, scale):
-        scale = F.softplus(scale)
-        df = 2.0 + F.softplus(df)
+        scale = cls.squareplus(scale)
+        df = 2.0 + cls.squareplus(df)
         return df.squeeze(-1), loc.squeeze(-1), scale.squeeze(-1)
 
 
@@ -246,10 +269,18 @@ class StudentTMixtureOutput(DistributionOutput):
             "scale": components,
         }
 
+    @staticmethod
+    def squareplus(x: torch.Tensor) -> torch.Tensor:
+        r"""
+        Helper to map inputs to the positive orthant by applying the square-plus operation. Reference:
+        https://twitter.com/jon_barron/status/1387167648669048833
+        """
+        return (x + torch.sqrt(torch.square(x) + 4.0)) / 2.0
+
     @classmethod
     def domain_map(cls, mix_logits, df, loc, scale):
-        scale = F.softplus(scale)
-        df = 2.0 + F.softplus(df)
+        scale = cls.squareplus(scale)
+        df = 2.0 + cls.squareplus(df)
         return (
             mix_logits.squeeze(-1),
             df.squeeze(-1),
@@ -258,58 +289,21 @@ class StudentTMixtureOutput(DistributionOutput):
         )
 
     def distribution(
-        self, distr_args, scale: Optional[torch.Tensor] = None
-    ) -> Distribution:
-        mix_logits, df, loc, dist_scale = distr_args
-
-        distr = MixtureSameFamily(
-            Categorical(logits=mix_logits), StudentT(df, loc, dist_scale)
-        )
-        if scale is None:
-            return distr
-        else:
-            return TransformedDistribution(distr, [AffineTransform(loc=0, scale=scale)])
-
-    @property
-    def event_shape(self) -> Tuple:
-        return ()
-
-
-class PiecewiseLinearOutput(DistributionOutput):
-    distr_cls: type = PiecewiseLinear
-
-    @validated()
-    def __init__(self, num_pieces: int) -> None:
-        super().__init__(self)
-        assert (
-            isinstance(num_pieces, int) and num_pieces > 1
-        ), "num_pieces should be an integer larger than 1"
-
-        self.num_pieces = num_pieces
-        self.args_dim = {"gamma": 1, "slopes": num_pieces, "knot_spacings": num_pieces}
-
-    @classmethod
-    def domain_map(cls, gamma, slopes, knot_spacings):
-        # slopes of the pieces are non-negative
-        slopes_proj = F.softplus(slopes) + 1e-4
-
-        # the spacing between the knots should be in [0, 1] and sum to 1
-        knot_spacings_proj = torch.softmax(knot_spacings, dim=-1)
-
-        return gamma.squeeze(axis=-1), slopes_proj, knot_spacings_proj
-
-    def distribution(
         self,
         distr_args,
+        loc: Optional[torch.Tensor] = None,
         scale: Optional[torch.Tensor] = None,
-    ) -> PiecewiseLinear:
+    ) -> Distribution:
+        mix_logits, df, dist_loc, dist_scale = distr_args
+
+        distr = MixtureSameFamily(
+            Categorical(logits=mix_logits), StudentT(df, dist_loc, dist_scale)
+        )
         if scale is None:
-            return self.distr_cls(*distr_args)
-        else:
-            distr = self.distr_cls(*distr_args)
-            return TransformedPiecewiseLinear(
-                distr, [AffineTransform(loc=0, scale=scale)]
-            )
+            scale = 1.0
+        if loc is None:
+            loc = 0.0
+        return AffineTransformed(distr, loc=loc, scale=scale)
 
     @property
     def event_shape(self) -> Tuple:
@@ -326,23 +320,35 @@ class NormalMixtureOutput(DistributionOutput):
             "scale": components,
         }
 
+    @staticmethod
+    def squareplus(x: torch.Tensor) -> torch.Tensor:
+        r"""
+        Helper to map inputs to the positive orthant by applying the square-plus operation. Reference:
+        https://twitter.com/jon_barron/status/1387167648669048833
+        """
+        return (x + torch.sqrt(torch.square(x) + 4.0)) / 2.0
+
     @classmethod
     def domain_map(cls, mix_logits, loc, scale):
-        scale = F.softplus(scale)
+        scale = cls.squareplus(scale)
         return mix_logits.squeeze(-1), loc.squeeze(-1), scale.squeeze(-1)
 
     def distribution(
-        self, distr_args, scale: Optional[torch.Tensor] = None
+        self,
+        distr_args,
+        loc: Optional[torch.Tensor] = None,
+        scale: Optional[torch.Tensor] = None,
     ) -> Distribution:
-        mix_logits, loc, dist_scale = distr_args
+        mix_logits, dist_loc, dist_scale = distr_args
 
         distr = MixtureSameFamily(
-            Categorical(logits=mix_logits), Normal(loc, dist_scale)
+            Categorical(logits=mix_logits), Normal(dist_loc, dist_scale)
         )
         if scale is None:
-            return distr
-        else:
-            return TransformedDistribution(distr, [AffineTransform(loc=0, scale=scale)])
+            scale = 1.0
+        if loc is None:
+            loc = 0.0
+        return AffineTransformed(distr, loc=loc, scale=scale)
 
     @property
     def event_shape(self) -> Tuple:
@@ -367,16 +373,25 @@ class LowRankMultivariateNormalOutput(DistributionOutput):
 
     def domain_map(self, loc, cov_factor, cov_diag):
         diag_bias = (
-            self.inv_softplus(self.sigma_init ** 2) if self.sigma_init > 0.0 else 0.0
+            self.inv_softplus(self.sigma_init**2) if self.sigma_init > 0.0 else 0.0
         )
 
         shape = cov_factor.shape[:-1] + (self.dim, self.rank)
         cov_factor = cov_factor.reshape(shape)
-        cov_diag = F.softplus(cov_diag + diag_bias) + self.sigma_minimum ** 2
+        cov_diag = self.squareplus(cov_diag + diag_bias) + self.sigma_minimum**2
 
         return loc, cov_factor, cov_diag
 
-    def inv_softplus(self, y):
+    @staticmethod
+    def squareplus(x: torch.Tensor) -> torch.Tensor:
+        r"""
+        Helper to map inputs to the positive orthant by applying the square-plus operation. Reference:
+        https://twitter.com/jon_barron/status/1387167648669048833
+        """
+        return (x + torch.sqrt(torch.square(x) + 4.0)) / 2.0
+
+    @staticmethod
+    def inv_softplus(y):
         if y < 20.0:
             return np.log(np.exp(y) - 1.0)
         else:
@@ -393,6 +408,14 @@ class MultivariateNormalOutput(DistributionOutput):
         self.args_dim = {"loc": dim, "scale_tril": dim * dim}
         self.dim = dim
 
+    @staticmethod
+    def squareplus(x: torch.Tensor) -> torch.Tensor:
+        r"""
+        Helper to map inputs to the positive orthant by applying the square-plus operation. Reference:
+        https://twitter.com/jon_barron/status/1387167648669048833
+        """
+        return (x + torch.sqrt(torch.square(x) + 4.0)) / 2.0
+
     def domain_map(self, loc, scale):
         d = self.dim
         device = scale.device
@@ -400,7 +423,7 @@ class MultivariateNormalOutput(DistributionOutput):
         shape = scale.shape[:-1] + (d, d)
         scale = scale.reshape(shape)
 
-        scale_diag = F.softplus(scale * torch.eye(d, device=device)) * torch.eye(
+        scale_diag = self.squareplus(scale * torch.eye(d, device=device)) * torch.eye(
             d, device=device
         )
 
@@ -410,15 +433,19 @@ class MultivariateNormalOutput(DistributionOutput):
         return loc, scale_tril
 
     def distribution(
-        self, distr_args, scale: Optional[torch.Tensor] = None
+        self,
+        distr_args,
+        loc: Optional[torch.Tensor] = None,
+        scale: Optional[torch.Tensor] = None,
     ) -> Distribution:
-        loc, scale_tri = distr_args
-        distr = MultivariateNormal(loc=loc, scale_tril=scale_tri)
+        dist_loc, scale_tri = distr_args
+        distr = MultivariateNormal(loc=dist_loc, scale_tril=scale_tri)
 
         if scale is None:
-            return distr
-        else:
-            return TransformedDistribution(distr, [AffineTransform(loc=0, scale=scale)])
+            scale = 1.0
+        if loc is None:
+            loc = 0.0
+        return AffineTransformed(distr, loc=loc, scale=scale)
 
     @property
     def event_shape(self) -> Tuple:
@@ -436,10 +463,12 @@ class FlowOutput(DistributionOutput):
     def domain_map(cls, cond):
         return (cond,)
 
-    def distribution(self, distr_args, scale=None):
+    def distribution(self, distr_args, loc=None, scale=None):
         (cond,) = distr_args
         if scale is not None:
             self.flow.scale = scale
+        if loc is not None:
+            self.flow.loc = loc
         self.flow.cond = cond
 
         return self.flow
@@ -460,10 +489,12 @@ class DiffusionOutput(DistributionOutput):
     def domain_map(cls, cond):
         return (cond,)
 
-    def distribution(self, distr_args, scale=None):
+    def distribution(self, distr_args, loc=None, scale=None):
         (cond,) = distr_args
         if scale is not None:
             self.diffusion.scale = scale
+        if loc is not None:
+            self.diffusion.loc = loc
         self.diffusion.cond = cond
 
         return self.diffusion
@@ -471,104 +502,3 @@ class DiffusionOutput(DistributionOutput):
     @property
     def event_shape(self) -> Tuple:
         return (self.dim,)
-
-
-class QuantilePtArgProj(PtArgProj):
-    def __init__(
-        self,
-        in_features: int,
-        output_domain_cls: nn.Module,
-        args_dim: Dict[str, int],
-        domain_map: Callable[..., Tuple[torch.Tensor]],
-        **kwargs,
-    ):
-        super().__init__(in_features, args_dim, domain_map, **kwargs)
-        self.output_domain_cls = output_domain_cls
-        self.proj = ImplicitQuantileModule(in_features, output_domain_cls)
-
-    def forward(self, x: torch.Tensor):
-        batch_size = x.shape[0]
-        forecast_length = x.shape[1]
-        device = x.device
-        taus = torch.rand(size=(batch_size, forecast_length), device=device)
-        self.register_buffer("taus", taus)
-        self.register_buffer("nn_ouput", x.clone().detach())
-        predicted_quantiles = self.proj(x, taus)
-        return self.domain_map(predicted_quantiles)
-
-
-class ImplicitQuantileOutput(IndependentDistributionOutput):
-    distr_cls: type = ImplicitQuantile
-    in_features = 1
-    args_dim = {"quantile_function": 1}
-    output_domain_cls: type = nn.Module
-    quantile_arg_proj: type = nn.Module
-
-    @validated()
-    def __init__(self, output_domain: str) -> None:
-        super().__init__()
-        self.set_output_domain_map(output_domain)
-        self.set_args_proj()
-
-    @classmethod
-    def set_output_domain_map(cls, output_domain):
-        available_domain_map_cls = {
-            "Positive": nn.Softplus,
-            "Real": nn.Identity,
-            "Unit": nn.Softmax,
-        }
-        assert (
-            output_domain in available_domain_map_cls.keys()
-        ), "Only the following output domains are allowed: {}".format(
-            available_domain_map_cls.keys()
-        )
-        output_domain_cls = available_domain_map_cls[output_domain]
-        cls.output_domain_cls = output_domain_cls
-
-    @classmethod
-    def set_args_proj(cls):
-        cls.quantile_arg_proj = QuantilePtArgProj(
-            in_features=cls.in_features,
-            output_domain_cls=cls.output_domain_cls,
-            args_dim=cls.args_dim,
-            domain_map=LambdaLayer(cls.domain_map),
-        )
-
-    @classmethod
-    def domain_map(cls, *args):
-        return args
-
-    @classmethod
-    def args_proj(cls, in_features):
-        if in_features != cls.in_features:
-            cls.in_features = in_features
-            cls.set_args_proj()
-        return cls.quantile_arg_proj
-
-    def get_args_proj(self, in_features: int, prefix: Optional[str] = None):
-        return self.args_proj(in_features)
-
-    def distribution(
-        self,
-        distr_args,
-        scale: Optional[torch.Tensor] = None,
-    ) -> ImplicitQuantile:
-
-        args_proj = self.get_args_proj(self.in_features)
-        implicit_quantile_function = args_proj.proj.eval()
-        distr = self.distr_cls(
-            implicit_quantile_function=implicit_quantile_function,
-            taus=list(args_proj.buffers())[0],
-            nn_output=list(args_proj.buffers())[1],
-            predicted_quantiles=distr_args,
-        )
-        if scale is None:
-            return distr
-        else:
-            return TransformedImplicitQuantile(
-                distr, [AffineTransform(loc=0, scale=scale)]
-            )
-
-    @property
-    def event_shape(self) -> Tuple:
-        return ()

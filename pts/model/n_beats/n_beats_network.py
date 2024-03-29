@@ -4,7 +4,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 from gluonts.time_feature import get_seasonality
 
 VALID_N_BEATS_STACK_TYPES = "G", "S", "T"
@@ -140,11 +139,11 @@ class NBEATSTrendBlock(NBEATSBlock):
 
         self.register_buffer(
             "T_backcast",
-            torch.tensor([backcast_linspace ** i for i in range(thetas_dim)]).float(),
+            torch.tensor([backcast_linspace**i for i in range(thetas_dim)]).float(),
         )
         self.register_buffer(
             "T_forecast",
-            torch.tensor([forecast_linspace ** i for i in range(thetas_dim)]).float(),
+            torch.tensor([forecast_linspace**i for i in range(thetas_dim)]).float(),
         )
 
     def forward(self, x) -> Tuple[torch.Tensor, torch.Tensor]:

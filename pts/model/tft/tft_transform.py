@@ -11,11 +11,9 @@
 # express or implied. See the License for the specific language governing
 # permissions and limitations under the License.
 
-from collections import Counter
-from typing import Iterator, List, Optional
+from typing import Iterator, List
 
 import numpy as np
-
 from gluonts.core.component import validated
 from gluonts.dataset.common import DataEntry
 from gluonts.dataset.field_names import FieldName
@@ -69,7 +67,6 @@ class TFTInstanceSplitter(InstanceSplitter):
         past_time_series_fields: List[str] = [],
         dummy_value: float = 0.0,
     ) -> None:
-
         super().__init__(
             target_field=target_field,
             is_pad_field=is_pad_field,

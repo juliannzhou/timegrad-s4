@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
-from torch.distributions import constraints, NegativeBinomial, Poisson, Distribution
+from torch.distributions import Distribution, NegativeBinomial, Poisson, constraints
 from torch.distributions.utils import broadcast_all, lazy_property
 
 from .utils import broadcast_shape
@@ -62,7 +62,7 @@ class ZeroInflatedDistribution(Distribution):
     @lazy_property
     def variance(self):
         return (1 - self.gate) * (
-            self.base_dist.mean ** 2 + self.base_dist.variance
+            self.base_dist.mean**2 + self.base_dist.variance
         ) - (self.mean) ** 2
 
     def expand(self, batch_shape, _instance=None):

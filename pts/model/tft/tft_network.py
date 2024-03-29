@@ -1,20 +1,18 @@
-from typing import List, Optional, Tuple, Union
+from typing import List
 
-import numpy as np
 import torch
 import torch.nn as nn
-from torch.distributions import Distribution
-
 from gluonts.core.component import validated
+
 from pts.model import weighted_average
 
 from .tft_modules import (
-    FeatureProjector,
     FeatureEmbedder,
-    VariableSelectionNetwork,
+    FeatureProjector,
     GatedResidualNetwork,
-    TemporalFusionEncoder,
     TemporalFusionDecoder,
+    TemporalFusionEncoder,
+    VariableSelectionNetwork,
 )
 from .tft_output import QuantileOutput
 
@@ -175,8 +173,8 @@ class TemporalFusionTransformerNetwork(nn.Module):
         obs = past_target * past_observed_values
         count = past_observed_values.sum(dim=1, keepdim=True)
         offset = obs.sum(1, keepdim=True) / (count + self.normalize_eps)
-        scale = torch.sum(obs ** 2, 1, keepdim=True) / (count + self.normalize_eps)
-        scale = torch.sqrt(scale - offset ** 2)
+        scale = torch.sum(obs**2, 1, keepdim=True) / (count + self.normalize_eps)
+        scale = torch.sqrt(scale - offset**2)
 
         past_target = (past_target - offset) / (scale + self.normalize_eps)
         past_target = past_target.unsqueeze(-1)
