@@ -109,3 +109,6 @@ wandb/
 runs/
 .vscode/
 lightning_logs/
+
+# DS Store
+.DS_Store
